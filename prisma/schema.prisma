@@ -1,0 +1,248 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------
+// 枚举类型定义 (Prisma 枚举必须是有效的标识符，所以替换了空格和符号)
+// ----------------------------------------
+enum Purpose {
+  Study_Abroad
+  CET_4_6
+  Travel
+  Work
+  Exam
+}
+
+enum Role {
+  user
+  admin
+}
+
+enum Theme {
+  light
+  dark
+}
+
+enum Difficulty {
+  A1
+  A2
+  B1
+  B2
+  C1
+  C2
+}
+
+enum SessionStatus {
+  in_progress
+  completed
+  abandoned
+}
+
+enum PracticeMode {
+  full_text
+  fill_in_blank
+}
+
+enum NoteType {
+  difficult_word
+  grammar
+  pronunciation
+  personal
+}
+
+enum ActionType {
+  started
+  resumed
+  completed
+  abandoned
+}
+
+// ----------------------------------------
+// 数据模型定义
+// ----------------------------------------
+
+model User {
+  id               Int       @id @default(autoincrement())
+  email            String    @unique @db.VarChar(255)
+  password_hash    String    @db.VarChar(255)
+  nickname         String    @db.VarChar(50)
+  phone            String?   @db.VarChar(20)
+  avatar_url       String?   @db.Text
+  purpose          Purpose?
+  role             Role      @default(user)
+  theme_preference Theme     @default(light)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+  last_login_at    DateTime?
+
+  // 关系定义
+  materials        Material[]
+  practiceSessions PracticeSession[]
+  notes            Note[]
+  progress         UserProgress[]
+  weeklyGoals      WeeklyGoal[]
+  learningRecords  LearningRecord[]
+}
+
+model Category {
+  id          Int        @id @default(autoincrement())
+  name        String     @db.VarChar(100)
+  description String?    @db.Text
+  icon        String?    @db.VarChar(50)
+  parent_id   Int?
+  sort_order  Int?
+  created_at  DateTime   @default(now())
+  
+  parent      Category?  @relation("CategoryToCategory", fields: [parent_id], references: [id])
+  children    Category[] @relation("CategoryToCategory")
+  materials   Material[]
+}
+
+model Material {
+  id             Int        @id @default(autoincrement())
+  category_id    Int
+  user_id        Int?       // 补充了缺失的外键字段
+  title          String     @db.VarChar(255)
+  description    String?    @db.Text
+  cover_image_url String?   @db.VarChar(500)
+  audio_url      String     @db.VarChar(500)
+  difficulty_level Difficulty?
+  total_duration Int?
+  total_sentences Int?
+  transcript_url String?    @db.VarChar(500)
+  tags           Json?
+  is_published   Boolean    @default(false)
+  view_count     Int        @default(0)
+  created_at     DateTime   @default(now())
+  updated_at     DateTime   @updatedAt
+
+  category       Category   @relation(fields: [category_id], references: [id])
+  creator        User?      @relation(fields: [user_id], references: [id])
+  sentences      Sentence[]
+  sessions       PracticeSession[]
+  notes          Note[]
+  progress       UserProgress[]
+  records        LearningRecord[]
+}
+
+model Sentence {
+  id                  Int      @id @default(autoincrement())
+  material_id         Int
+  order_index         Int
+  content             String   @db.Text
+  audio_start_time    Float?
+  audio_end_time      Float?
+  difficulty_keywords Json?
+  explanation         String?  @db.Text
+  translation         String?  @db.Text
+  created_at          DateTime @default(now())
+
+  material            Material @relation(fields: [material_id], references: [id])
+  practiceSessions    PracticeSession[] // 关联当前进行的句子
+  practiceResults     PracticeResult[]
+  notes               Note[]
+}
+
+model PracticeSession {
+  id                  Int           @id @default(autoincrement())
+  user_id             Int
+  material_id         Int
+  status              SessionStatus
+  practice_mode       PracticeMode  @default(full_text) // 补充：区分全文或填空模式
+  current_sentence_id Int?
+  progress_percentage Decimal?      @db.Decimal(5,2)
+  started_at          DateTime      @default(now())
+  completed_at        DateTime?
+  total_time_spent    Int?
+  playback_speed      Decimal?      @db.Decimal(3,2)
+
+  user                User          @relation(fields: [user_id], references: [id])
+  material            Material      @relation(fields: [material_id], references: [id])
+  current_sentence    Sentence?     @relation(fields: [current_sentence_id], references: [id])
+  results             PracticeResult[]
+}
+
+model PracticeResult {
+  id                  Int      @id @default(autoincrement())
+  session_id          Int
+  sentence_id         Int
+  user_answer         String?  @db.Text
+  correct_answer      String   @db.Text
+  is_correct          Boolean?
+  accuracy_score      Decimal? @db.Decimal(5,2)
+  time_spent_seconds  Int?
+  hint_used           Boolean  @default(false)
+  repetition_count    Int      @default(1)
+  created_at          DateTime @default(now())
+
+  session             PracticeSession @relation(fields: [session_id], references: [id])
+  sentence            Sentence        @relation(fields: [sentence_id], references: [id])
+}
+
+model Note {
+  id                  Int      @id @default(autoincrement())
+  user_id             Int
+  material_id         Int
+  sentence_id         Int?
+  content             String   @db.Text
+  note_type           NoteType?
+  is_favorite         Boolean  @default(false)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  user                User     @relation(fields: [user_id], references: [id])
+  material            Material @relation(fields: [material_id], references: [id])
+  sentence            Sentence? @relation(fields: [sentence_id], references: [id])
+}
+
+model UserProgress {
+  id                  Int      @id @default(autoincrement())
+  user_id             Int
+  material_id         Int
+  completed_sentences Int      @default(0)
+  total_sentences     Int?
+  progress_percentage Decimal? @db.Decimal(5,2)
+  total_time_spent    Int?
+  best_accuracy       Decimal? @db.Decimal(5,2)
+  attempt_count       Int      @default(1)
+  last_accessed_at    DateTime @default(now())
+  completed_at        DateTime?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  user                User     @relation(fields: [user_id], references: [id])
+  material            Material @relation(fields: [material_id], references: [id])
+}
+
+model WeeklyGoal {
+  id                  Int      @id @default(autoincrement())
+  user_id             Int
+  target_hours        Decimal  @db.Decimal(5,2)
+  completed_hours     Decimal  @default(0.00) @db.Decimal(5,2)
+  week_start_date     DateTime @db.Date
+  week_end_date       DateTime @db.Date
+  is_achieved         Boolean  @default(false)
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  user                User     @relation(fields: [user_id], references: [id])
+}
+
+model LearningRecord {
+  id                  Int        @id @default(autoincrement())
+  user_id             Int
+  material_id         Int
+  action_type         ActionType
+  progress_at_action  Decimal?   @db.Decimal(5,2)
+  time_spent          Int?
+  recorded_at         DateTime   @default(now())
+
+  user                User       @relation(fields: [user_id], references: [id])
+  material            Material   @relation(fields: [material_id], references: [id])
+}

@@ -1,0 +1,6 @@
+node_modules
+dist
+public/audio
+transcripts
+whisper.log
+*.log
