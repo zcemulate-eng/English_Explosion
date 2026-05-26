@@ -16,27 +16,15 @@ import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
-// ─── 内存存储 ─────────────────────────────────────────────────────────────────
-
-interface ResetCodeEntry {
-	code: string;
-	expiresAt: Date;
-}
-
-// 登录失败记录：{ failCount, lockedUntil }
-interface LoginAttemptEntry {
-	failCount: number;
-	lockedUntil: Date | null;
-}
+// ─── 登录锁定 / 验证码：常量 ────────────────────────────────────────────────
+// 失败次数与验证码均已落库（LoginAttempt / ResetCode 表），重启不丢、多实例共享。
 
 const MAX_FAIL = 5;                    // 最多失败次数
 const LOCK_MS = 15 * 60 * 1000;      // 锁定时长：15 分钟
+const RESET_CODE_MS = 10 * 60 * 1000; // 验证码有效期：10 分钟
 
 @Injectable()
 export class AuthService {
-	private resetCodes = new Map<string, ResetCodeEntry>();
-	private loginAttempts = new Map<string, LoginAttemptEntry>();
-
 	constructor(
 		private prisma: PrismaService,
 		private jwtService: JwtService,
@@ -65,9 +53,9 @@ export class AuthService {
 		const { email, password, rememberMe } = dto;
 
 		// ── 检查是否处于锁定状态 ────────────────────────────────────────────────
-		const attempt = this.loginAttempts.get(email);
-		if (attempt?.lockedUntil && new Date() < attempt.lockedUntil) {
-			const remainingMs = attempt.lockedUntil.getTime() - Date.now();
+		const attempt = await this.prisma.loginAttempt.findUnique({ where: { email } });
+		if (attempt?.locked_until && new Date() < attempt.locked_until) {
+			const remainingMs = attempt.locked_until.getTime() - Date.now();
 			const remainingMin = Math.ceil(remainingMs / 60000);
 			throw new ForbiddenException(
 				`Account temporarily locked. Please try again in ${remainingMin} minute${remainingMin > 1 ? 's' : ''}.`
@@ -84,21 +72,25 @@ export class AuthService {
 		// ── 验证密码 ─────────────────────────────────────────────────────────────
 		const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 		if (!isPasswordValid) {
-			// 记录失败次数
-			const current = this.loginAttempts.get(email) ?? { failCount: 0, lockedUntil: null };
-			const newCount = current.failCount + 1;
+			// 记录失败次数（落库）
+			const newCount = (attempt?.fail_count ?? 0) + 1;
 
 			if (newCount >= MAX_FAIL) {
 				// 达到上限，锁定账户
-				this.loginAttempts.set(email, {
-					failCount: newCount,
-					lockedUntil: new Date(Date.now() + LOCK_MS),
+				await this.prisma.loginAttempt.upsert({
+					where: { email },
+					create: { email, fail_count: newCount, locked_until: new Date(Date.now() + LOCK_MS) },
+					update: { fail_count: newCount, locked_until: new Date(Date.now() + LOCK_MS) },
 				});
 				throw new ForbiddenException(
 					`Too many failed attempts. Account locked for 15 minutes.`
 				);
 			} else {
-				this.loginAttempts.set(email, { failCount: newCount, lockedUntil: null });
+				await this.prisma.loginAttempt.upsert({
+					where: { email },
+					create: { email, fail_count: newCount, locked_until: null },
+					update: { fail_count: newCount, locked_until: null },
+				});
 				const remaining = MAX_FAIL - newCount;
 				throw new UnauthorizedException(
 					`Incorrect email or password. ${remaining} attempt${remaining > 1 ? 's' : ''} remaining.`
@@ -107,7 +99,9 @@ export class AuthService {
 		}
 
 		// ── 登录成功：清除失败记录 ────────────────────────────────────────────────
-		this.loginAttempts.delete(email);
+		if (attempt) {
+			await this.prisma.loginAttempt.delete({ where: { email } }).catch(() => undefined);
+		}
 
 		const payload = { sub: user.id, email: user.email, role: user.role };
 		const expiresIn = rememberMe ? '7d' : '1d';
@@ -140,9 +134,10 @@ export class AuthService {
 		if (!user) throw new NotFoundException('This email is not registered. Please check or create an account.');
 
 		const code = Math.floor(100000 + Math.random() * 900000).toString();
-		this.resetCodes.set(email, {
-			code,
-			expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 分钟有效
+		await this.prisma.resetCode.upsert({
+			where: { email },
+			create: { email, code, expires_at: new Date(Date.now() + RESET_CODE_MS) },
+			update: { code, expires_at: new Date(Date.now() + RESET_CODE_MS) },
 		});
 
 		await this.mailService.sendResetCode(email, code);
@@ -151,10 +146,10 @@ export class AuthService {
 
 	// ── Step 2：验证验证码 ────────────────────────────────────────────────────
 	async verifyResetCode(email: string, code: string) {
-		const entry = this.resetCodes.get(email);
+		const entry = await this.prisma.resetCode.findUnique({ where: { email } });
 		if (!entry) throw new BadRequestException('No reset code found. Please request a new one.');
-		if (new Date() > entry.expiresAt) {
-			this.resetCodes.delete(email);
+		if (new Date() > entry.expires_at) {
+			await this.prisma.resetCode.delete({ where: { email } }).catch(() => undefined);
 			throw new BadRequestException('Verification code has expired. Please request a new one.');
 		}
 		if (entry.code !== code) throw new BadRequestException('Incorrect verification code.');
@@ -165,10 +160,10 @@ export class AuthService {
 	async resetPassword(dto: ResetPasswordDto) {
 		const { email, code, newPassword } = dto;
 
-		const entry = this.resetCodes.get(email);
+		const entry = await this.prisma.resetCode.findUnique({ where: { email } });
 		if (!entry) throw new BadRequestException('No reset code found. Please request a new one.');
-		if (new Date() > entry.expiresAt) {
-			this.resetCodes.delete(email);
+		if (new Date() > entry.expires_at) {
+			await this.prisma.resetCode.delete({ where: { email } }).catch(() => undefined);
 			throw new BadRequestException('Verification code has expired. Please request a new one.');
 		}
 		if (entry.code !== code) throw new BadRequestException('Incorrect verification code.');
@@ -179,7 +174,7 @@ export class AuthService {
 		const hashedPassword = await bcrypt.hash(newPassword, 10);
 		await this.prisma.user.update({ where: { email }, data: { password_hash: hashedPassword } });
 
-		this.resetCodes.delete(email); // 用完即删
+		await this.prisma.resetCode.delete({ where: { email } }).catch(() => undefined); // 用完即删
 		return { message: 'Password reset successfully. You can now log in.' };
 	}
 

@@ -1,4 +1,3 @@
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -47,13 +46,6 @@ enum SessionStatus {
 enum PracticeMode {
   full_text
   fill_in_blank
-}
-
-enum NoteType {
-  difficult_word
-  grammar
-  pronunciation
-  personal
 }
 
 enum ActionType {
@@ -166,6 +158,7 @@ model PracticeSession {
   material            Material      @relation(fields: [material_id], references: [id])
   current_sentence    Sentence?     @relation(fields: [current_sentence_id], references: [id])
   results             PracticeResult[]
+  learningRecords     LearningRecord[]
 }
 
 model PracticeResult {
@@ -191,7 +184,6 @@ model Note {
   material_id         Int
   sentence_id         Int?
   content             String   @db.Text
-  note_type           NoteType?
   is_favorite         Boolean  @default(false)
   created_at          DateTime @default(now())
   updated_at          DateTime @updatedAt
@@ -238,11 +230,29 @@ model LearningRecord {
   id                  Int        @id @default(autoincrement())
   user_id             Int
   material_id         Int
+  session_id          Int?       // 关联到具体练习会话；进度/时长通过关联查询获取，不再冗余存储
   action_type         ActionType
-  progress_at_action  Decimal?   @db.Decimal(5,2)
-  time_spent          Int?
   recorded_at         DateTime   @default(now())
 
-  user                User       @relation(fields: [user_id], references: [id])
-  material            Material   @relation(fields: [material_id], references: [id])
+  user                User             @relation(fields: [user_id], references: [id])
+  material            Material         @relation(fields: [material_id], references: [id])
+  session             PracticeSession? @relation(fields: [session_id], references: [id])
+}
+
+// ─── 登录失败锁定（持久化，替代内存 Map）─────────────────────────────────────
+// 重启不丢失、多实例共享。以 email 作主键，每个邮箱一行。
+model LoginAttempt {
+  email        String    @id @db.VarChar(255)
+  fail_count   Int       @default(0)
+  locked_until DateTime?
+  updated_at   DateTime  @updatedAt
+}
+
+// ─── 密码重置验证码（持久化，替代内存 Map）──────────────────────────────────
+// 以 email 作主键，每个邮箱同时只保留一个有效验证码。
+model ResetCode {
+  email      String   @id @db.VarChar(255)
+  code       String   @db.VarChar(10)
+  expires_at DateTime
+  created_at DateTime @default(now())
 }

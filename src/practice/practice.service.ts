@@ -9,23 +9,51 @@ export class PracticeService {
 
   // POST /practice/sessions
   async createOrResumeSession(userId: number, dto: CreateSessionDto) {
+    // ① 指定 resume_session_id：恢复该会话
     if (dto.resume_session_id) {
       const existing = await this.prisma.practiceSession.findFirst({
         where: { id: dto.resume_session_id, user_id: userId },
       });
-      if (existing) return { session: existing, resumed: true };
+      if (existing) {
+        await this.recordLearning(userId, existing.material_id, existing.id, 'resumed');
+        return { session: existing, resumed: true };
+      }
     }
 
+    // ② 该材料存在未完成会话：自动恢复
     const unfinished = await this.prisma.practiceSession.findFirst({
       where: { user_id: userId, material_id: dto.material_id, status: 'in_progress' },
       orderBy: { started_at: 'desc' },
     });
-    if (unfinished) return { session: unfinished, resumed: true };
+    if (unfinished) {
+      await this.recordLearning(userId, unfinished.material_id, unfinished.id, 'resumed');
+      return { session: unfinished, resumed: true };
+    }
 
+    // ③ 全新开始
     const session = await this.prisma.practiceSession.create({
       data: { user_id: userId, material_id: dto.material_id, status: 'in_progress' },
     });
+    await this.recordLearning(userId, session.material_id, session.id, 'started');
     return { session, resumed: false };
+  }
+
+  // 写入一条学习行为流水（事件日志，append-only）
+  // 进度/时长不在此冗余存储，需要时通过 session 关联查询
+  private async recordLearning(
+    userId: number,
+    materialId: number,
+    sessionId: number,
+    actionType: 'started' | 'resumed' | 'completed' | 'abandoned',
+  ) {
+    await this.prisma.learningRecord.create({
+      data: {
+        user_id:     userId,
+        material_id: materialId,
+        session_id:  sessionId,
+        action_type: actionType,
+      },
+    });
   }
 
   // POST /practice/progress
@@ -80,18 +108,40 @@ export class PracticeService {
       },
     });
 
+    // 计算本次 session 的平均准确率（用于 best_accuracy）
+    const accAgg = await this.prisma.practiceResult.aggregate({
+      where: { session_id, accuracy_score: { not: null } },
+      _avg: { accuracy_score: true },
+    });
+    const sessionAccuracy =
+      accAgg._avg.accuracy_score != null ? Number(accAgg._avg.accuracy_score) : null;
+
     // 同步更新 UserProgress
     const existingProgress = await this.prisma.userProgress.findFirst({
       where: { user_id: userId, material_id },
     });
     if (existingProgress) {
+      // best_accuracy：取历史最佳与本次的较大值
+      const prevBest =
+        existingProgress.best_accuracy != null ? Number(existingProgress.best_accuracy) : 0;
+      const newBest =
+        sessionAccuracy != null ? Math.max(prevBest, sessionAccuracy) : prevBest;
+
+      // attempt_count：本次完成、且此前已完成过 → 视为再次完成，次数 +1
+      const newAttemptCount =
+        isCompleted && existingProgress.completed_at
+          ? existingProgress.attempt_count + 1
+          : existingProgress.attempt_count;
+
       await this.prisma.userProgress.update({
         where: { id: existingProgress.id },
         data: {
           progress_percentage,
           total_time_spent: (existingProgress.total_time_spent ?? 0) + addedTime,
+          best_accuracy:    newBest,
+          attempt_count:    newAttemptCount,
           last_accessed_at: new Date(),
-          completed_at:     isCompleted ? new Date() : null,
+          completed_at:     isCompleted ? new Date() : existingProgress.completed_at,
         },
       });
     } else {
@@ -99,10 +149,16 @@ export class PracticeService {
         data: {
           user_id: userId, material_id, progress_percentage,
           total_time_spent: addedTime,
+          best_accuracy:    sessionAccuracy ?? undefined,
           last_accessed_at: new Date(),
           completed_at:     isCompleted ? new Date() : null,
         },
       });
+    }
+
+    // 完成时记录一条 completed 行为流水
+    if (isCompleted) {
+      await this.recordLearning(userId, material_id, session_id, 'completed');
     }
 
     // ── 累加 Weekly Goal completed_hours ──────────────────────────────────

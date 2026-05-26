@@ -1,6 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateNoteDto } from './dto/create-note.dto';
+import { UpdateNoteDto } from './dto/update-note.dto';
+import sanitizeHtml from 'sanitize-html';
+
+// 笔记为纯文本，剥离所有 HTML 标签与属性，防止存储型 XSS
+function clean(text: string): string {
+  return sanitizeHtml(text, { allowedTags: [], allowedAttributes: {} }).trim();
+}
 
 @Injectable()
 export class NotesService {
@@ -25,8 +32,24 @@ export class NotesService {
         user_id:     userId,
         material_id: dto.material_id,
         sentence_id: dto.sentence_id ?? null,
-        content:     dto.content,
-        note_type:   dto.note_type ?? null,
+        content:     clean(dto.content),
+      },
+    });
+  }
+
+  // PATCH /notes/:id
+  async updateNote(userId: number, noteId: number, dto: UpdateNoteDto) {
+    const note = await this.prisma.note.findFirst({
+      where: { id: noteId, user_id: userId },
+    });
+    if (!note) throw new NotFoundException('Note not found');
+
+    return this.prisma.note.update({
+      where: { id: noteId },
+      data: { content: clean(dto.content) },
+      include: {
+        material: { select: { id: true, title: true } },
+        sentence: { select: { id: true, content: true, order_index: true } },
       },
     });
   }

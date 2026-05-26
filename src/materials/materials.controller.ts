@@ -1,31 +1,37 @@
 import { Controller, Get, Param, ParseIntPipe, Res } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { MaterialsService } from './materials.service';
 import type { Response } from 'express';
 
 // 材料相关接口全部跳过限流：
 // - 是公开只读接口，无安全风险
 // - 精听页会频繁调用 /audio（Range 请求），限流会导致播放中断
+@ApiTags('materials')
 @SkipThrottle()
 @Controller('materials')
 export class MaterialsController {
   constructor(private readonly materialsService: MaterialsService) {}
 
+  @ApiOperation({ summary: '获取所有材料列表' })
   @Get()
   getAllMaterials() {
     return this.materialsService.findAll();
   }
 
+  @ApiOperation({ summary: '获取单个材料详情' })
   @Get(':id')
   getMaterial(@Param('id', ParseIntPipe) id: number) {
     return this.materialsService.findById(id);
   }
 
+  @ApiOperation({ summary: '获取材料的句子列表' })
   @Get(':id/sentences')
   getSentences(@Param('id', ParseIntPipe) id: number) {
     return this.materialsService.findSentences(id);
   }
 
+  @ApiOperation({ summary: '获取材料音频（重定向到 OSS 或本地流式返回）' })
   @Get(':id/audio')
   async streamAudio(
     @Param('id', ParseIntPipe) id: number,
